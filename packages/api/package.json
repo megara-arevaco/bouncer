@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "files": [
     "dist"
@@ -25,5 +25,15 @@
     "better-auth": "1.7.10",
     "better-sqlite3": "^12.0.0",
     "pg": "^8.16.0"
+  },
+  "description": "Application-owned authentication for Node.js APIs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/megara-arevaco/bouncer.git",
+    "directory": "packages/api"
+  },
+  "homepage": "https://github.com/megara-arevaco/bouncer#readme",
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

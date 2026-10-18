@@ -22,9 +22,32 @@ flowchart LR
 
 There is no shared user directory or cross-application session. SQLite is available for development; PostgreSQL is required by Bouncer in production.
 
+## Method discovery and application authorization
+
+The API exposes the policy through `GET /api/auth/bouncer-config`. When `methods` is supplied, it is an allowlist: omitted methods are disabled at the API as well as hidden by the panels. With no `methods` object, email/password is enabled, magic links follow mail availability, configured social providers are enabled, and passkeys default to enabled on a domain or localhost. Username/password always requires an explicit opt-in.
+
+```mermaid
+flowchart TD
+    Start[Load application] --> Config[GET /api/auth/bouncer-config]
+    Config --> Panel[Render enabled authentication methods]
+    Panel --> Session[GET /api/auth/get-session]
+    Session --> SignedIn{Valid session?}
+    SignedIn -->|No| Login[Show AuthPanel]
+    Login --> Session
+    SignedIn -->|Yes| App[Show protected interface]
+    App --> Request[Request application API with cookie]
+    Request --> Check[Host API calls bouncer.getSession]
+    Check --> Allowed{Session and resource permission valid?}
+    Allowed -->|No session| Unauthorized[Return 401]
+    Allowed -->|No permission| Forbidden[Return 403]
+    Allowed -->|Yes| Data[Read or write authorized user data]
+```
+
+`AuthGuard` is a UI boundary. Resource permissions and roles belong to the host API. Database/capability/network failures must be handled by the host; they must not grant access.
+
 ## Email and password
 
-Email verification is required by default. Registration does not create an authenticated session under this default. Passwords must contain 12 to 128 characters and are hashed on the server.
+Email verification is required by default. Registration does not create an authenticated session under this default. Passwords contain at least `minPasswordLength` characters (12 by default, configurable up to 128) and at most 128. They are hashed on the server. This flow requires `emailPassword`; when only `usernamePassword` is enabled, registration still uses an email but login uses the username endpoint.
 
 ```mermaid
 sequenceDiagram
@@ -45,8 +68,12 @@ sequenceDiagram
         Mail-->>User: Verification email
         User->>API: Open verification link
         API->>API: Validate verification token
-        API->>DB: Mark email as verified
-        API-->>UI: Redirect to application without signing in
+        alt Token invalid or expired
+            API-->>UI: Redirect with verification error
+        else Token valid
+            API->>DB: Mark email as verified
+            API-->>UI: Redirect to application without signing in
+        end
     end
     User->>UI: Enter email and password
     UI->>API: POST /api/auth/sign-in/email
@@ -64,9 +91,39 @@ sequenceDiagram
 
 Setting `requireEmailVerification: false` changes this flow: verification is no longer a login requirement, and successful password registration can establish a session. A configured `sendMail` callback enables verification and recovery emails. With the default verification requirement, this callback is mandatory.
 
+## Username and password
+
+Enable `methods.usernamePassword`. Registration uses `/sign-up/email` with name, email, password and username; it follows the email-verification policy above. Usernames are immutable, normalized to lowercase and limited to 3–40 ASCII letters, digits, dots, underscores or hyphens. `/is-username-available` is disabled to avoid exposing username availability.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Application frontend
+    participant API as Application API with Bouncer
+    participant DB as Application database
+    User->>UI: Enter username and password
+    UI->>API: POST /api/auth/sign-in/username
+    API->>API: Check origin, enabled method and rate limit
+    API->>DB: Find normalized username and credential account
+    API->>API: Verify password and email verification policy
+    alt Invalid credentials or unverified email
+        opt Correct password but verification required
+            API->>API: Request verification email through configured sender
+        end
+        API-->>UI: Reject login without creating a session
+    else Login accepted
+        API->>DB: Create application session
+        API-->>UI: Set HttpOnly session cookie
+        UI->>API: GET /api/auth/get-session
+        API-->>UI: Current user and session
+    end
+```
+
+When both password methods are enabled, `AuthPanel` treats an identifier containing `@` as email and other identifiers as usernames. When only username/password is enabled, it always uses username login. The registration email remains required for verification and recovery. See [configuration](../README.md#configuration) for explicit method selection.
+
 ## Google
 
-The application supplies its own Google client ID and secret. Register the application's `/api/auth/callback/google` URL with Google. The frontend only shows Google when it appears in the API capabilities.
+The application supplies its own Google client ID and secret. Register the application's `/api/auth/callback/google` URL with Google. The frontend only shows Google when it appears in the API capabilities. If `methods` is supplied, set `methods.google: true` as well as providing credentials.
 
 ```mermaid
 sequenceDiagram
@@ -101,7 +158,7 @@ Automatic account linking is disabled. An existing email/password account is not
 
 ## GitHub
 
-The application supplies its own GitHub client ID and secret. Register the application's `/api/auth/callback/github` URL with GitHub. The frontend only shows GitHub when it appears in the API capabilities.
+The application supplies its own GitHub client ID and secret. Register the application's `/api/auth/callback/github` URL with GitHub. The frontend only shows GitHub when it appears in the API capabilities. If `methods` is supplied, set `methods.github: true` as well as providing credentials.
 
 ```mermaid
 sequenceDiagram
@@ -136,7 +193,7 @@ The same account-linking policy applies to GitHub. Provider credentials stay in 
 
 ## Magic link
 
-Magic links are enabled when `sendMail` is configured. A link is short-lived, single-use and stored in hashed form. Registration policy is enforced when an unknown user redeems a link.
+Without an explicit `methods` object, magic links are enabled when `sendMail` is configured. With `methods`, enable `magicLink: true` and provide `sendMail`. The default expiry is five minutes, configurable between one and fifteen minutes through `magicLinkExpiresIn`. A link is short-lived, single-use and stored in hashed form. Registration policy is enforced when an unknown user redeems a link.
 
 ```mermaid
 sequenceDiagram
@@ -161,6 +218,9 @@ sequenceDiagram
         alt Unknown user and registration closed
             API-->>UI: Redirect with authentication error
         else User accepted
+            opt Existing account has unverified email
+                API->>DB: Remove unproven password and revoke prior sessions
+            end
             API->>DB: Verify email and create application session
             API-->>UI: Set HttpOnly session cookie and redirect to callbackURL
         end
@@ -190,8 +250,12 @@ sequenceDiagram
     Device-->>UI: Credential and registration response
     UI->>API: POST /api/auth/passkey/verify-registration
     API->>API: Verify challenge, origin and relying party
-    API->>DB: Store public key and credential metadata
-    API-->>UI: Passkey registered
+    alt Challenge, session or attestation invalid
+        API-->>UI: Reject enrollment without storing credential
+    else Enrollment accepted
+        API->>DB: Store public key and credential metadata
+        API-->>UI: Passkey registered
+    end
     Note over User,DB: Sign in with an enrolled passkey
     User->>UI: Use passkey
     UI->>API: GET /api/auth/passkey/generate-authenticate-options
@@ -246,6 +310,28 @@ sequenceDiagram
     end
 ```
 
+## Password change
+
+The client exposes `client.changePassword` when password authentication and mail delivery enable the password-management endpoints. The current `AccountPanel` does not render a password-change form; the host can provide one. This operation requires an authenticated session and the current password. Recovery above is the route for users who no longer know their password.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Application frontend
+    participant API as Application API with Bouncer
+    participant DB as Application database
+    User->>UI: Enter current and new password
+    UI->>API: POST /api/auth/change-password with revokeOtherSessions true
+    API->>API: Require session, verify current password and validate new password
+    alt Session, current password or new password invalid
+        API-->>UI: Reject change
+    else Change accepted
+        API->>DB: Replace password hash and revoke existing sessions
+        API->>DB: Create replacement session for current browser
+        API-->>UI: Password updated and replacement session cookie
+    end
+```
+
 ## Session checks and revocation
 
 Sessions expire after seven days and can be renewed after one day of activity. Cookies are HttpOnly, use SameSite=Lax and are scoped to `/` by default (configurable through `cookiePath`); HTTPS adds the Secure attribute. Each application uses its own cookie prefix and secret.
@@ -265,18 +351,19 @@ sequenceDiagram
         UI->>API: GET /api/auth/list-sessions
         API->>DB: Load sessions belonging to current user
         API-->>UI: Session list
+        Note over UI,DB: The operations below require a valid session
     end
-    opt Revoke another session
+    opt Valid session and revoke another session
         User->>UI: Select session to revoke
         UI->>API: POST /api/auth/revoke-session
         API->>DB: Verify ownership and remove selected session
     end
-    opt Close other sessions
+    opt Valid session and close other sessions
         User->>UI: Close other sessions
         UI->>API: POST /api/auth/revoke-other-sessions
         API->>DB: Remove other sessions belonging to current user
     end
-    opt Sign out
+    opt Sign out with current session
         User->>UI: Sign out
         UI->>API: POST /api/auth/sign-out
         API->>DB: Remove current session
@@ -285,3 +372,9 @@ sequenceDiagram
 ```
 
 For protected application endpoints, the host API passes incoming headers to `bouncer.getSession(headers)` and checks the result before accessing user data. The default cookie scope includes all application routes. When setting a narrower `cookiePath`, include both the auth endpoints and every application endpoint that needs the session cookie.
+
+## Failure and delivery boundaries
+
+All diagrams describe a successful mail handoff when a sender is shown. `sendMail` is supplied by the host; delivery failures must propagate and the host must provide a way to retry. Do not treat an accepted registration or generic recovery response as proof that an email was delivered. Verification, recovery and magic-link URLs carry credentials and must not appear in public logs.
+
+Social-provider consent/callback failures and browser WebAuthn cancellation do not create a session. A consumed magic-link token cannot be reused even if subsequent account creation fails. Database and network errors require host error handling. Run `npm run docs:check` to render every Mermaid block in Chromium; this checks diagram syntax and layout, while HTTP/browser tests validate the executable flows.

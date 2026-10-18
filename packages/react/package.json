@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "files": [
     "dist"
@@ -30,5 +30,15 @@
   "peerDependencies": {
     "react": "^18.3.0 || ^19.0.0",
     "react-dom": "^18.3.0 || ^19.0.0"
+  },
+  "description": "Application-owned authentication components and client for React",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/megara-arevaco/bouncer.git",
+    "directory": "packages/react"
+  },
+  "homepage": "https://github.com/megara-arevaco/bouncer#readme",
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

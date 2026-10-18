@@ -1,0 +1,14 @@
+{
+  "name": "@bouncer/playground",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bouncer/api": "0.1.0",
+    "@bouncer/react": "0.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "scripts": {
+    "build": "vite build --config vite.config.ts"
+  }
+}

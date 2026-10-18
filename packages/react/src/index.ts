@@ -14,3 +14,5 @@ export { AuthPanel } from "./auth-panel.js";
 export { AccountPanel } from "./account-panel.js";
 
 export type { BouncerBranding, BouncerPalette } from "./theme.js";
+
+export { SecurityPanel, TwoFactorChallenge } from "./security-panel.js";

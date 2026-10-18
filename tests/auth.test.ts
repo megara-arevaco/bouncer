@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHmac } from "node:crypto";
 import { Pool } from "pg";
 import {
   createBouncer,
@@ -110,7 +110,7 @@ function cookie(response: Response) {
 const user = {
   name: "Baul",
   email: "baul@example.test",
-  password: "correct horse battery staple",
+  password: "Bouncer isolated fixture phrase 7391",
 };
 
 test("HTTP: registro, verificación, login, sesiones, recuperación y aislamiento", async () => {
@@ -421,4 +421,84 @@ test("HTTP: methods are an API allowlist; username login and magic links work in
     await a.close();
     await magicOnly.close();
   }
+});
+
+test("HTTP: contraseñas filtradas, reautenticación y revocación persistente", async () => {
+  const f = await fixture("security", true, { sendMail: undefined, requireEmailVerification: false, minPasswordLength: 15, methods: { emailPassword: true } });
+  try {
+    const weak = await f.call("/sign-up/email", { email: "weak@example.test", password: "correct horse battery staple", name: "Weak" });
+    assert.equal(weak.status, 400);
+    assert.equal((await weak.json()).code, "PASSWORD_COMPROMISED");
+    const password = "Bouncer private security phrase 8734";
+    assert.equal((await f.call("/sign-up/email", { email: "safe@example.test", password, name: "Safe" })).status, 200);
+    const login = await f.call("/sign-in/email", { email: "safe@example.test", password });
+    const cookie = login.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+    const session = await f.bouncer.getSession(new Headers({ cookie }));
+    assert(session);
+    const ctx = await f.bouncer.auth.$context;
+    await ctx.adapter.update({ model: "session", where: [{ field: "id", value: session.session.id }], update: { createdAt: new Date(Date.now() - 600_000) } });
+    assert.equal((await f.call("/revoke-other-sessions", {}, cookie)).status, 403);
+    assert.equal((await f.call("/reauthenticate", { password: "incorrect" }, cookie)).status, 401);
+    assert.equal((await f.call("/reauthenticate", { password }, cookie, "https://attacker.example")).status, 403);
+    assert.equal((await f.call("/reauthenticate", { password }, cookie)).status, 200);
+    assert.equal((await f.call("/revoke-other-sessions", {}, cookie)).status, 200);
+    await f.bouncer.admin.disableUser(session.user.id, true);
+    assert.equal(await f.bouncer.getSession(new Headers({ cookie })), null);
+    assert.notEqual((await f.call("/sign-in/email", { email: "safe@example.test", password })).status, 200);
+  } finally { await f.close(); }
+});
+
+function totpFor(uri: string) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const secret = new URL(uri).searchParams.get("secret")!;
+  const bits = [...secret.toUpperCase().replace(/=/g, "")].map(letter => alphabet.indexOf(letter).toString(2).padStart(5, "0")).join("");
+  const key = Buffer.from(bits.match(/.{8}/g)!.map(byte => parseInt(byte, 2)));
+  const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
+  const digest = createHmac("sha1", key).update(counter).digest();
+  return ((digest.readUInt32BE(digest[19] & 15) & 0x7fffffff) % 1_000_000).toString().padStart(6, "0");
+}
+
+test("HTTP: TOTP exige segundo factor y los códigos de recuperación son de un uso", async () => {
+  const f = await fixture("mfa", true, { sendMail: undefined, requireEmailVerification: false, methods: { emailPassword: true }, security: { twoFactor: true } });
+  const cookies = (response: Response) => response.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+  try {
+    const password = "Bouncer private MFA phrase 9248";
+    await f.call("/sign-up/email", { email: "mfa@example.test", name: "MFA", password });
+    const login = await f.call("/sign-in/email", { email: "mfa@example.test", password });
+    let cookie = cookies(login);
+    const enrollment = await f.call("/two-factor/enable", { password }, cookie);
+    assert.equal(enrollment.status, 200);
+    const setup = await enrollment.json();
+    assert.equal(setup.backupCodes.length, 10);
+    const activation = await f.call("/two-factor/verify-totp", { code: totpFor(setup.totpURI) }, cookie);
+    assert.equal(activation.status, 200);
+    cookie = cookies(activation) || cookie;
+    const enabled = await f.bouncer.getSession(new Headers({ cookie }));
+    assert(enabled && "twoFactorEnabled" in enabled.user && enabled.user.twoFactorEnabled);
+    const attempt = await f.call("/sign-in/email", { email: "mfa@example.test", password });
+    assert.equal((await attempt.json()).twoFactorRedirect, true);
+    const pending = cookies(attempt);
+    assert.equal(await f.bouncer.getSession(new Headers({ cookie: pending })), null);
+    const verified = await f.call("/two-factor/verify-backup-code", { code: setup.backupCodes[0] }, pending);
+    assert.equal(verified.status, 200);
+    assert(await f.bouncer.getSession(new Headers({ cookie: cookies(verified) })));
+    const again = await f.call("/sign-in/email", { email: "mfa@example.test", password });
+    assert.notEqual((await f.call("/two-factor/verify-backup-code", { code: setup.backupCodes[0] }, cookies(again))).status, 200);
+    assert.equal((await f.call("/two-factor/verify-totp", { code: totpFor(setup.totpURI) }, cookies(again))).status, 200);
+  } finally { await f.close(); }
+});
+
+test("HTTP: HTTPS emite cookies __Host sin Domain para aislar subdominios", async () => {
+  const origin = "https://secure.example.test";
+  const f = await fixture("secure_cookies", true, { baseURL: origin, sendMail: undefined, requireEmailVerification: false, methods: { emailPassword: true } });
+  try {
+    const response = await f.call("/sign-up/email", { email: "secure@example.test", name: "Secure", password: "Bouncer secure cookie fixture 8347" }, undefined, origin);
+    assert.equal(response.status, 200);
+    const cookie = response.headers.getSetCookie().find(value => value.startsWith("__Host-bouncer_secure_cookies.session_token="));
+    assert(cookie);
+    assert.match(cookie, /; Secure(?:;|$)/i);
+    assert.match(cookie, /; HttpOnly(?:;|$)/i);
+    assert.match(cookie, /; Path=\/(?:;|$)/i);
+    assert.doesNotMatch(cookie, /; Domain=/i);
+  } finally { await f.close(); }
 });

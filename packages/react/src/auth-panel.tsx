@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode, type FormEvent } from "react";
+import { TwoFactorChallenge } from "./security-panel.js";
 import { Brand } from "./brand.js";
 import { useBouncer } from "./provider.js";
 type View = "login" | "register" | "forgot" | "magic" | "reset";
@@ -9,7 +10,7 @@ const titles: Record<View, string> = {
   magic: "Entra con tu correo",
   reset: "Elige una contraseña",
 };
-type Result = { error?: { message?: string | undefined } | null };
+type Result = { data?: unknown; error?: { message?: string | undefined } | null };
 export function AuthPanel({
   initialView = "login",
   resetToken,
@@ -30,6 +31,7 @@ export function AuthPanel({
         ? "magic"
         : initialView,
   );
+  const [challenge, setChallenge] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -55,7 +57,8 @@ export function AuthPanel({
         );
       else {
         if (success) setMessage(success);
-        if (authenticated) onAuthenticated?.();
+        if (authenticated && result.data && typeof result.data === "object" && "twoFactorRedirect" in result.data && result.data.twoFactorRedirect) setChallenge(true);
+        else if (authenticated) onAuthenticated?.();
       }
     } catch {
       setError("No se ha podido conectar. Inténtalo de nuevo.");
@@ -117,6 +120,7 @@ export function AuthPanel({
         "Contraseña actualizada. Ya puedes iniciar sesión.",
       );
   };
+  if (challenge) return <TwoFactorChallenge onAuthenticated={() => { setChallenge(false); onAuthenticated?.(); }} onCancel={() => setChallenge(false)} />;
   return (
     <section
       className="bouncer"

@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
+import { SecurityPanel } from "./security-panel.js";
 import { Brand } from "./brand.js";
 import { useBouncer, useSession, useSessions } from "./provider.js";
-export function AccountPanel({ logo }: { logo?: ReactNode } = {}) {
+export function AccountPanel({ logo, compact = false }: { logo?: ReactNode; compact?: boolean } = {}) {
   const { client, capabilities, themeStyle } = useBouncer();
   const session = useSession();
   const sessions = useSessions();
@@ -34,9 +35,9 @@ export function AccountPanel({ logo }: { logo?: ReactNode } = {}) {
   if (!session.data) return null;
   return (
     <section className="bouncer bouncer-account" style={themeStyle}>
-      <Brand logo={logo} />
+      {!compact && <Brand logo={logo} />}
       <p className="bouncer-eyebrow">TU CUENTA</p>
-      <h1>{session.data.user.name}</h1>
+      {!compact && <h1>{session.data.user.name}</h1>}
       <p>{session.data.user.email}</p>
       {capabilities.usernamePassword && <Username />}
       {error && (
@@ -49,6 +50,7 @@ export function AccountPanel({ logo }: { logo?: ReactNode } = {}) {
           {message}
         </p>
       )}
+      <SecurityPanel />
       <fieldset disabled={busy}>
         {capabilities.emailVerification && !session.data.user.emailVerified && (
           <button
@@ -105,12 +107,12 @@ export function AccountPanel({ logo }: { logo?: ReactNode } = {}) {
           Cerrar las otras sesiones
         </button>
         {capabilities.passkeys && <Passkeys run={run} />}
-        <button
+        {!compact && <button
           className="bouncer-primary"
           onClick={() => void run(() => client.signOut())}
         >
           Cerrar sesión
-        </button>
+        </button>}
       </fieldset>
     </section>
   );

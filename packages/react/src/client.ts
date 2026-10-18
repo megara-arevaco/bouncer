@@ -1,5 +1,5 @@
 import { createAuthClient } from "better-auth/react";
-import { magicLinkClient, usernameClient } from "better-auth/client/plugins";
+import { magicLinkClient, usernameClient, twoFactorClient } from "better-auth/client/plugins";
 import { passkeyClient } from "@better-auth/passkey/client";
 
 export function createBouncerClient(
@@ -7,7 +7,7 @@ export function createBouncerClient(
 ) {
   return createAuthClient({
     ...options,
-    plugins: [magicLinkClient(), passkeyClient(), usernameClient()],
+    plugins: [magicLinkClient(), passkeyClient(), usernameClient(), twoFactorClient()],
   });
 }
 export type BouncerClient = ReturnType<typeof createBouncerClient>;
@@ -19,6 +19,9 @@ export type BouncerCapabilities = {
   minPasswordLength: number;
   magicLink: boolean;
   passwordReset: boolean;
+  passwordChange?: boolean;
+  twoFactor?: boolean;
+  reauthentication?: boolean;
   emailVerification: boolean;
   passkeys: boolean;
   socialProviders: ("google" | "github")[];

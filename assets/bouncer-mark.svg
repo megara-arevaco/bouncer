@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Bouncer</title>
+  <desc id="desc">An amber B with an entrance arrow cut through its center, on a dark square.</desc>
+  <rect width="512" height="512" rx="112" fill="#10131A"/>
+  <path fill="#F4BA55" fill-rule="evenodd" d="M136 104h132c69 0 108 32 108 86 0 30-15 53-40 65 32 12 50 38 50 72 0 53-41 85-112 85H136V104Zm72 62v59h56c27 0 42-11 42-30s-15-29-42-29h-56Zm0 121v63h63c30 0 46-11 46-32s-16-31-46-31h-63Z"/>
+  <path fill="#10131A" d="M104 237h119v-24l55 43-55 43v-24H104v-38Z"/>
+</svg>

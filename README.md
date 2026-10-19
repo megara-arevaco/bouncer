@@ -1,25 +1,82 @@
-# Bouncer
+<div align="center">
+  <img src="assets/bouncer-mark.svg" width="132" height="132" alt="Bouncer logo">
+  <h1>Bouncer</h1>
+  <p><strong>Authentication, account security, and permissions — owned by your application.</strong></p>
+  <p>
+    <img alt="Node.js 24.7 or newer" src="https://img.shields.io/badge/Node.js-24.7%2B-5FA04E?logo=nodedotjs&logoColor=white">
+    <img alt="React 18.3 and 19" src="https://img.shields.io/badge/React-18.3%20%7C%2019-61DAFB?logo=react&logoColor=10131A">
+    <img alt="TypeScript 5" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
+    <img alt="Better Auth 1.7.10" src="https://img.shields.io/badge/Better_Auth-1.7.10-10131A">
+    <img alt="License: UNLICENSED" src="https://img.shields.io/badge/License-UNLICENSED-F4BA55">
+    <a href="https://github.com/megara-arevaco/bouncer/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/megara-arevaco/bouncer/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/megara-arevaco/bouncer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/megara-arevaco/bouncer?display_name=tag"></a>
+  </p>
+  <p>
+    <a href="#install-a-release">Install</a> ·
+    <a href="#api-integration">API</a> ·
+    <a href="#roles-and-permissions">Permissions</a> ·
+    <a href="#react-integration">React</a> ·
+    <a href="docs/uso-libreria.md">Guía en español</a>
+  </p>
+</div>
 
-Authentication libraries for application-owned Node.js APIs and React frontends, built on Better Auth. Each host application owns its database, users, sessions, secret, OAuth credentials and email delivery. Bouncer does not run a central identity service.
+Bouncer is a set of TypeScript libraries for Node.js APIs and React frontends,
+built on Better Auth. Your application owns its database, users, sessions,
+secrets, OAuth credentials, email delivery, and role assignments.
 
-Better Auth supplies the authentication engine and protocol flows. Bouncer adds opinionated application defaults, per-app table and cookie isolation, security policy and migration hooks, a typed capability contract, and ready-to-use React flows. If an application does not need those defaults or components, using Better Auth directly is a reasonable choice.
+Better Auth supplies the authentication engine and protocol flows. Bouncer adds
+shared security policies, application-specific table and cookie prefixes, defensive
+storage migrations, a typed capability contract, and React account flows. Use it
+to carry the same integration across applications; using Better Auth directly is
+also a reasonable choice when you do not need those policies or components.
 
-- `@bouncer/api`: HTTP handler, migrations, server-side session checks and capability discovery.
-- `@bouncer/react`: client, provider, authentication/account panels, session hooks and branding.
-- [Guía de uso de la librería](docs/uso-libreria.md): integración de API y React, opciones, proxy, ejemplos y límites.
-- [Flows de autenticación](docs/auth-flows.md): requisitos y comportamiento de cada método, recuperación, cuenta y sesiones, con diagramas Mermaid.
+## What Bouncer does
+
+- Supports email/password, username/password, magic links, passkeys, and optional Google/GitHub sign-in.
+- Provides email verification, password recovery, TOTP, and recovery codes.
+- Applies Argon2id password hashing, progressive rehash, and configurable compromised-password checks.
+- Adds magic-link confirmation, recent authentication for sensitive actions, and persistent abuse limits.
+- Stores session token HMACs and encrypted OAuth tokens, with migrations for existing data.
+- Exposes session checks, revocation, and a capability endpoint for the frontend.
+- Includes React authentication and account panels with configurable branding.
+- Checks application-defined roles and permissions through a separate authorization package.
+
+| Package | Purpose |
+| --- | --- |
+| `@bouncer/api` | Authentication handler, migrations, session checks, and account security. |
+| `@bouncer/react` | Client, provider, authentication/account panels, session hooks, and branding. |
+| `@bouncer/authorization` | Role-to-permission policies and server-side permission checks. |
+
+> [!IMPORTANT]
+> Bouncer is under active development. The host application must authorize each
+> resource and configure TLS, trusted origins, proxy handling, and email delivery.
+> The local playground and its development mailbox must stay out of production.
+
+## Requirements
+
+- Node.js **24.7 or newer**.
+- PostgreSQL for production; SQLite is supported for development.
+- React **18.3 or 19** when using `@bouncer/react`.
+- An application mail adapter for magic links, verification, and password recovery.
+- Your own provider credentials when enabling Google or GitHub.
+
+The [usage guide](docs/uso-libreria.md) and [authentication flows](docs/auth-flows.md)
+cover integration details in Spanish, including configuration, proxy handling,
+recovery, accounts, and session behavior.
 
 ## Install a release
 
-Requires Node.js 24 or newer, React 18.3/19 and PostgreSQL in production. SQLite is supported for development. Packages are distributed as compiled npm archives through [GitHub Releases](https://github.com/megara-arevaco/bouncer/releases), rather than a sibling checkout or npm registry publication.
+Packages are distributed as compiled npm archives through [GitHub Releases](https://github.com/megara-arevaco/bouncer/releases).
+Install the packages your application needs from the same release:
 
 ```sh
 npm install --save-exact \
-  https://github.com/megara-arevaco/bouncer/releases/download/v0.1.1/bouncer-api-0.1.1.tgz \
-  https://github.com/megara-arevaco/bouncer/releases/download/v0.1.1/bouncer-react-0.1.1.tgz
+  https://github.com/megara-arevaco/bouncer/releases/download/v0.2.1/bouncer-api-0.2.1.tgz \
+  https://github.com/megara-arevaco/bouncer/releases/download/v0.2.1/bouncer-react-0.2.1.tgz \
+  https://github.com/megara-arevaco/bouncer/releases/download/v0.2.1/bouncer-authorization-0.2.1.tgz
 ```
 
-Commit the application's lockfile: it pins archive integrity and transitive dependencies. Releases also contain `SHA256SUMS` for independent archive verification. Install both packages from the same release. Never depend on a `latest` download URL. The packages retain their existing `UNLICENSED` status; distributing archives does not grant an open-source license.
+Commit the application's lockfile: it pins archive integrity and transitive dependencies. Releases also contain `SHA256SUMS` for independent archive verification. Keep installed Bouncer packages on the same release. Never depend on a `latest` download URL. The packages retain their existing `UNLICENSED` status; distributing archives does not grant an open-source license.
 
 ## API integration
 
@@ -94,6 +151,34 @@ Without `methods`, email/password is enabled; magic links follow mail availabili
 
 Authentication responses no longer include bearer `token` fields, and `getSession()` no longer exposes `session.token`. Integrations that read those values must use the HttpOnly session cookie and the public session ID for session management.
 
+## Roles and permissions
+
+`@bouncer/authorization` maps application-defined roles to permissions. Resolve the
+current role from your application's data and enforce permissions on the server:
+
+```ts
+import { createAuthorization } from "@bouncer/authorization";
+
+const authorization = createAuthorization({
+  roles: {
+    admin: ["projects:read", "projects:write"],
+    member: ["projects:read"],
+  },
+  getRole: async (userId: string) =>
+    (await applicationUsers.findById(userId))?.role,
+});
+
+// After checking the session, before accessing the protected resource:
+await authorization.requirePermission(session.user.id, "projects:write");
+```
+
+`applicationUsers` represents your own user repository. Roles remain in your
+database and are resolved on each check, so changing a role does not depend on
+stale grants in a session. Anonymous users and unknown roles receive no permissions.
+`can()` returns a boolean; `requirePermission()` throws `AuthorizationError` with
+`status: 403`, which the host should map to its HTTP response. The package does not
+include a role administration panel or organization-scoped memberships.
+
 ## React integration
 
 Load capabilities from your own API before rendering the provider. Import the stylesheet once. The panels currently use Spanish UI copy; the detailed usage and flow guides are also available in Spanish.
@@ -149,12 +234,12 @@ The playground runs at `http://localhost:4310`, stores SQLite data under `.data/
 
 ## Release a version
 
-Both packages use a coordinated SemVer version. During `0.x`, a minor version can introduce breaking API or schema changes; patch versions preserve the public API. Review database migrations and the pinned Better Auth version for every upgrade. Do not overwrite published tags or archives; fix a release with a new version.
+All three packages use a coordinated SemVer version. During `0.x`, a minor version can introduce breaking API or schema changes; patch versions preserve the public API. Review database migrations and the pinned Better Auth version for every upgrade. Do not overwrite published tags or archives; fix a release with a new version.
 
-1. Update both `packages/*/package.json` versions and the playground's matching dependencies; run `npm install --package-lock-only`.
-2. Run the checks above, `npm run release:pack` and `npm run release:check`. This builds distributable JS, declarations and CSS into two npm archives, checks their contents and writes checksums under `artifacts/v<version>/`.
+1. Update all `packages/*/package.json` versions and the playground's matching dependencies; run `npm install --package-lock-only`.
+2. Run the checks above, `npm run release:pack` and `npm run release:check`. This builds distributable JS, declarations and CSS into three npm archives, checks their contents and writes checksums under `artifacts/v<version>/`.
 3. Commit and push the reviewed changes, then create and push the matching `v<version>` tag.
-4. The release workflow reruns validation, installs the archives in an isolated TypeScript consumer, and publishes both archives and `SHA256SUMS` as a GitHub Release. A tag/version mismatch fails publication.
-5. Consumers update both exact archive URLs together, review the release and lockfile, then run their integration tests and migrations before deployment.
+4. The release workflow reruns validation, installs the archives in an isolated TypeScript consumer, and publishes all three archives and `SHA256SUMS` as a GitHub Release. A tag/version mismatch fails publication.
+5. Consumers update their installed Bouncer packages to matching exact archive URLs, review the release and lockfile, then run their integration tests and migrations before deployment.
 
 Release automation uses repository-scoped `contents: write` only for the publishing job. No npm token or registry account is required.

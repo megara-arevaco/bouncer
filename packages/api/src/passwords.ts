@@ -1,5 +1,4 @@
-import { argon2, createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { verifyPassword as verifyScryptPassword } from "better-auth/crypto";
+import { argon2, createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 export class PasswordPolicyError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
@@ -58,7 +57,19 @@ export async function verifyPassword({ password, hash }: { password: string; has
     return timingSafeEqual(await derive(password, Buffer.from(match[4], "hex"), parameters), Buffer.from(match[5], "hex"));
   }
   if (hash.startsWith("argon2id-")) return false;
-  return verifyScryptPassword({ password, hash });
+  const legacy = /^([a-f0-9]{32}):([a-f0-9]{128})$/.exec(hash);
+  if (!legacy) return false;
+  if (hashes >= 4) throw new PasswordPolicyError("TRY_LATER", "Inténtalo más tarde.");
+  hashes++;
+  try {
+    // Preserve Better Auth's legacy salt encoding and Unicode normalization.
+    const key = await new Promise<Buffer>((resolve, reject) => scrypt(
+      password.normalize("NFKC"), legacy[1], 64,
+      { N: 16_384, r: 16, p: 1, maxmem: 128 * 16_384 * 16 * 2 },
+      (error, value) => error ? reject(error) : resolve(value),
+    ));
+    return timingSafeEqual(key, Buffer.from(legacy[2], "hex"));
+  } finally { hashes--; }
 }
 export function passwordNeedsRehash(hash: string, parameters = DEFAULT_ARGON2ID_PARAMETERS) {
   const match = /^argon2id-v2:(\d+):(\d+):(\d+):[a-f0-9]{32}:[a-f0-9]{64}$/.exec(hash);

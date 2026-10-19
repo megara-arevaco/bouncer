@@ -168,7 +168,11 @@ test("Argon2id acepta parámetros configurables y verifica formatos heredados", 
   }, (error, value) => error ? reject(error) : resolve(value)));
   assert.equal(await verifyPassword({ password, hash: `argon2id-v1:${salt.toString("hex")}:${oldArgonTag.toString("hex")}` }), true);
 
-  assert.equal(await verifyPassword({ password, hash: await legacyScryptHash(password) }), true);
+  const legacy = await legacyScryptHash(password);
+  assert.equal(await verifyPassword({ password, hash: legacy }), true);
+  assert.equal(await verifyPassword({ password: "incorrect password", hash: legacy }), false);
+  assert.equal(await verifyPassword({ password, hash: "plaintext-password" }), false);
+  assert.equal(await verifyPassword({ password, hash: `${legacy}:unexpected` }), false);
 });
 
 test("password reset response stays generic when email delivery fails", async () => {

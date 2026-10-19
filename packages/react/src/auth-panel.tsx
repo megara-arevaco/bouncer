@@ -213,7 +213,6 @@ export function AuthPanel({
                     view === "login" ? "current-password" : "new-password"
                   }
                   minLength={view === "login" ? 1 : c.minPasswordLength}
-                  maxLength={128}
                   aria-describedby={
                     view !== "login" ? `${id}-password-hint` : undefined
                   }

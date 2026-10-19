@@ -1,10 +1,12 @@
-# Bouncer authentication flows
+# Flows de autenticación de Bouncer
 
-Each application imports `@bouncer/react` into its frontend and `@bouncer/api` into its own API. Users, sessions, database connections, secrets, email delivery and OAuth credentials belong to that application. Bouncer is a library, not a shared authentication service.
+Cada aplicación integra `@bouncer/react` en su frontend y `@bouncer/api` en su API. Conserva su propia base de datos, usuarios, sesiones, secreto, credenciales OAuth y envío de correo. No existe un servicio central de identidad ni SSO entre aplicaciones.
 
-Endpoints below use the default `/api/auth` path. The application mounts the handler, runs migrations and protects its own API routes by checking the session. React components and `AuthGuard` control the interface; authorization must also run on the server.
+Las rutas usan `basePath: "/api/auth"`. Los ejemplos del cliente y la integración completa están en [Uso de la librería](uso-libreria.md). La sesión se comprueba también en cada endpoint privado; `AuthGuard` solo controla la interfaz.
 
-## Application boundary
+## Frontera de cada aplicación
+
+Cada aplicación necesita su propio `appId` estable y secreto aleatorio. Los prefijos separan tablas y nombres de cookies, pero no aíslan el sistema operativo ni aplicaciones maliciosas en el mismo hostname. PostgreSQL es obligatorio con `NODE_ENV=production`; SQLite queda para desarrollo.
 
 ```mermaid
 flowchart LR
@@ -20,11 +22,9 @@ flowchart LR
     end
 ```
 
-There is no shared user directory or cross-application session. SQLite is available for development; PostgreSQL is required by Bouncer in production.
+## Descubrimiento y autorización
 
-## Method discovery and application authorization
-
-The API exposes the policy through `GET /api/auth/bouncer-config`. When `methods` is supplied, it is an allowlist: omitted methods are disabled at the API as well as hidden by the panels. With no `methods` object, email/password is enabled, magic links follow mail availability, configured social providers are enabled, and passkeys default to enabled on a domain or localhost. Username/password always requires an explicit opt-in.
+Antes de renderizar el proveedor, consultar `GET /api/auth/bouncer-config`. Con `methods`, las claves omitidas quedan deshabilitadas también en la API. Sin ese objeto: contraseña por correo habilitada, magic link según disponibilidad de correo, proveedores según credenciales y passkeys por defecto sobre dominio/localhost. Usuario y contraseña requieren activación explícita.
 
 ```mermaid
 flowchart TD
@@ -43,11 +43,11 @@ flowchart TD
     Allowed -->|Yes| Data[Read or write authorized user data]
 ```
 
-`AuthGuard` is a UI boundary. Resource permissions and roles belong to the host API. Database/capability/network failures must be handled by the host; they must not grant access.
+`AuthGuard` no asigna permisos. La API anfitriona devuelve 401 sin sesión y 403 si el usuario carece de permiso sobre el recurso. Ante fallos de configuración, red o base de datos, debe impedir el acceso y mostrar un error recuperable.
 
-## Email and password
+## Correo y contraseña
 
-Email verification is required by default. Registration does not create an authenticated session under this default. Passwords contain at least `minPasswordLength` characters (12 by default, configurable up to 128) and at most 128. They are hashed on the server. This flow requires `emailPassword`; when only `usernamePassword` is enabled, registration still uses an email but login uses the username endpoint.
+Activar `methods.emailPassword`. Alta con nombre, correo y contraseña de 12–128 caracteres por defecto; `minPasswordLength` permite aumentar el mínimo hasta 128. Con la política predeterminada se envía verificación, no se inicia sesión al registrarse y el acceso se rechaza hasta verificar el correo.
 
 ```mermaid
 sequenceDiagram
@@ -89,11 +89,11 @@ sequenceDiagram
     end
 ```
 
-Setting `requireEmailVerification: false` changes this flow: verification is no longer a login requirement, and successful password registration can establish a session. A configured `sendMail` callback enables verification and recovery emails. With the default verification requirement, this callback is mandatory.
+`requireEmailVerification: false` permite entrar sin verificar y puede establecer sesión tras el alta. Verificar un enlace no inicia sesión automáticamente. Se requiere `sendMail` con la política predeterminada; sus fallos se propagan. Para reenviar la verificación se usa `client.sendVerificationEmail({ email, callbackURL })`.
 
-## Username and password
+## Usuario y contraseña
 
-Enable `methods.usernamePassword`. Registration uses `/sign-up/email` with name, email, password and username; it follows the email-verification policy above. Usernames are immutable, normalized to lowercase and limited to 3–40 ASCII letters, digits, dots, underscores or hyphens. `/is-username-available` is disabled to avoid exposing username availability.
+Activar `methods.usernamePassword`. El alta sigue siendo `/sign-up/email`, incluyendo `username`, nombre, correo y contraseña. El correo sigue siendo necesario para verificación y recuperación. El usuario se normaliza a minúsculas, admite 3–40 caracteres ASCII (letras, números, punto, guion y guion bajo) y es inmutable.
 
 ```mermaid
 sequenceDiagram
@@ -119,11 +119,11 @@ sequenceDiagram
     end
 ```
 
-When both password methods are enabled, `AuthPanel` treats an identifier containing `@` as email and other identifiers as usernames. When only username/password is enabled, it always uses username login. The registration email remains required for verification and recovery. See [configuration](../README.md#configuration) for explicit method selection.
+El acceso usa `client.signIn.username({ username, password })`. Si ambos métodos están activos, el panel interpreta un identificador con `@` como correo; los demás como usuario. Una cuenta sin nombre de usuario puede añadirlo desde `AccountPanel` con `client.updateUser({ username })`. No hay cambio posterior; `/is-username-available` está deshabilitado para reducir enumeración.
 
 ## Google
 
-The application supplies its own Google client ID and secret. Register the application's `/api/auth/callback/google` URL with Google. The frontend only shows Google when it appears in the API capabilities. If `methods` is supplied, set `methods.google: true` as well as providing credentials.
+Configurar credenciales propias en `socialProviders.google` y activar `methods.google` si existe `methods`. Registrar exactamente `https://<dominio>/api/auth/callback/google` en Google (ajustar basePath). El cliente llama `signIn.social({ provider: "google", callbackURL })`.
 
 ```mermaid
 sequenceDiagram
@@ -154,11 +154,11 @@ sequenceDiagram
     end
 ```
 
-Automatic account linking is disabled. An existing email/password account is not silently merged with a Google identity that uses the same email. Denied consent, invalid state or a failed token exchange returns an authentication error without a new session.
+El proveedor valida estado y callback antes de crear sesión. La vinculación automática de cuentas está desactivada: compartir correo con una cuenta existente no implica fusionarlas. Credenciales incorrectas, denegación del consentimiento o conflicto de cuenta terminan en error. `registration: false` impide altas nuevas por este método. El consentimiento real de Google requiere validación manual con credenciales propias.
 
 ## GitHub
 
-The application supplies its own GitHub client ID and secret. Register the application's `/api/auth/callback/github` URL with GitHub. The frontend only shows GitHub when it appears in the API capabilities. If `methods` is supplied, set `methods.github: true` as well as providing credentials.
+Configurar `socialProviders.github` y `methods.github` si se usa selección explícita. Registrar `https://<dominio>/api/auth/callback/github`. El cliente llama `signIn.social({ provider: "github", callbackURL })`.
 
 ```mermaid
 sequenceDiagram
@@ -189,11 +189,11 @@ sequenceDiagram
     end
 ```
 
-The same account-linking policy applies to GitHub. Provider credentials stay in the application API; they are never passed to React. Real Google and GitHub sign-in requires credentials and provider setup; neither provider is configured in the default playground.
+Aplica la misma política de vinculación y registro que en Google. Los secretos permanecen en la API; React solo recibe las capacidades. Verificar manualmente el retorno del proveedor y el caso de correo no disponible/privado con la configuración real; los tests locales no sustituyen esa prueba.
 
-## Magic link
+## Enlace mágico
 
-Without an explicit `methods` object, magic links are enabled when `sendMail` is configured. With `methods`, enable `magicLink: true` and provide `sendMail`. The default expiry is five minutes, configurable between one and fifteen minutes through `magicLinkExpiresIn`. A link is short-lived, single-use and stored in hashed form. Registration policy is enforced when an unknown user redeems a link.
+Activar `methods.magicLink` y `sendMail`; sin `methods`, basta tener envío de correo. Solicitar con `client.signIn.magicLink({ email, callbackURL })`; el usuario abre el enlace recibido y vuelve a la aplicación con sesión. Caduca por defecto a los 300 segundos, configurable entre 60 y 900; se almacena hasheado y solo se consume una vez.
 
 ```mermaid
 sequenceDiagram
@@ -227,11 +227,11 @@ sequenceDiagram
     end
 ```
 
-For an existing account with an unverified email, successful magic-link verification removes its existing password and revokes its previous sessions before establishing the new session. The email owner can set a password through password recovery.
+`registration: false` impide crear una cuenta desconocida al canjear el enlace. En una cuenta existente con correo sin verificar, el canje elimina la contraseña no demostrada y revoca sesiones anteriores antes de abrir la nueva sesión. El dueño puede fijar una contraseña mediante recuperación. Un token consumido no sirve aunque falle después la creación de cuenta; solicitar otro enlace.
 
-## Passkeys
+## Passkeys: alta, acceso, listado y borrado
 
-Passkey enrollment requires an authenticated, fresh session. A user first creates or accesses their account through another method, then selects **Add passkey** in the account panel. The browser must support WebAuthn. Use HTTPS with a domain in production or `localhost` in development; numeric IP addresses are not supported as relying-party domains.
+Activar `methods.passkeys`. Requiere WebAuthn y dominio HTTPS, o localhost en desarrollo; Bouncer rechaza IP numérica como relying party. Primero hay que entrar por otro método para registrar la credencial desde una sesión reciente. Configurar solo passkeys deja sin alta inicial a usuarios nuevos.
 
 ```mermaid
 sequenceDiagram
@@ -274,11 +274,11 @@ sequenceDiagram
     end
 ```
 
-The private key remains with the authenticator. Removing a passkey from the account panel removes its server-side credential; it does not automatically revoke existing sessions. If the browser cancels the WebAuthn prompt, the client stops before submitting a verification response.
+`client.passkey.addPasskey({ name: "Mi dispositivo" })` inicia el registro; `client.signIn.passkey()` autentica sin contraseña. `client.useListPasskeys()` lista credenciales del usuario y `client.passkey.deletePasskey({ id })` las elimina. La clave privada permanece en el autenticador; borrar una passkey no revoca sesiones ya abiertas. Cancelar el diálogo no abre sesión. Mantener un método de recuperación y planificar el dominio definitivo: cambiar el RP ID puede dejar las credenciales anteriores inutilizables.
 
-## Password recovery
+## Recuperación de contraseña
 
-The application must serve the recovery page at the redirect URL. The current `AuthPanel` builds a `reset-password` URL relative to `callbackURL`; the playground handles `/reset-password` and passes its token to `AuthPanel` through `resetToken`.
+Disponible cuando hay autenticación por contraseña y envío de correo (`capabilities.passwordReset`). `client.requestPasswordReset({ email, redirectTo })` devuelve respuesta genérica exista o no la cuenta. El anfitrión debe servir la página de recuperación y pasar el parámetro `token` a `<AuthPanel resetToken={token} />`.
 
 ```mermaid
 sequenceDiagram
@@ -310,9 +310,11 @@ sequenceDiagram
     end
 ```
 
-## Password change
+`AuthPanel` calcula `reset-password` relativo a `callbackURL`; la barra final importa si se usa subruta. El enlace pasa por la API y redirige a esa página con token. `client.resetPassword({ newPassword, token })` consume el token, actualiza la contraseña y revoca sesiones. Token inválido, caducado o ya usado falla; volver a solicitarlo. No se inicia sesión automáticamente.
 
-The client exposes `client.changePassword` when password authentication and mail delivery enable the password-management endpoints. The current `AccountPanel` does not render a password-change form; the host can provide one. This operation requires an authenticated session and the current password. Recovery above is the route for users who no longer know their password.
+## Cambio de contraseña autenticado
+
+El cliente expone `client.changePassword({ currentPassword, newPassword, revokeOtherSessions: true })` cuando contraseña y correo permiten los endpoints de gestión de contraseña. `AccountPanel` no trae formulario de cambio; lo implementa el anfitrión.
 
 ```mermaid
 sequenceDiagram
@@ -332,9 +334,11 @@ sequenceDiagram
     end
 ```
 
-## Session checks and revocation
+Requiere sesión y contraseña actual válida. El diagrama muestra explícitamente `revokeOtherSessions: true`: se revocan sesiones previas y se establece una sesión de reemplazo para el navegador actual. Recuperación es el camino cuando se desconoce la contraseña actual; no son operaciones intercambiables.
 
-Sessions expire after seven days and can be renewed after one day of activity. Cookies are HttpOnly, use SameSite=Lax and are scoped to `/` by default (configurable through `cookiePath`); HTTPS adds the Secure attribute. Each application uses its own cookie prefix and secret.
+## Sesión, renovación y revocación
+
+La sesión dura siete días y puede renovarse después de un día de actividad. Cookies HttpOnly, SameSite=Lax y Path=/ por defecto; Secure cuando `baseURL` usa HTTPS. `cookiePath` debe cubrir tanto autenticación como todos los endpoints que necesitan sesión.
 
 ```mermaid
 sequenceDiagram
@@ -371,10 +375,10 @@ sequenceDiagram
     end
 ```
 
-For protected application endpoints, the host API passes incoming headers to `bouncer.getSession(headers)` and checks the result before accessing user data. The default cookie scope includes all application routes. When setting a narrower `cookiePath`, include both the auth endpoints and every application endpoint that needs the session cookie.
+Consultar con `client.getSession()` o `useSession()`. `client.listSessions()` requiere sesión; `client.revokeSession({ token })` comprueba pertenencia, `client.revokeOtherSessions()` cierra las demás y `client.signOut()` cierra la actual. Los tokens de sesiones son credenciales: no registrarlos ni enviarlos a analítica. La API privada llama `bouncer.getSession(fromNodeHeaders(req.headers))` antes de acceder a datos.
 
-## Failure and delivery boundaries
+## Fallos y responsabilidad del anfitrión
 
-All diagrams describe a successful mail handoff when a sender is shown. `sendMail` is supplied by the host; delivery failures must propagate and the host must provide a way to retry. Do not treat an accepted registration or generic recovery response as proof that an email was delivered. Verification, recovery and magic-link URLs carry credentials and must not appear in public logs.
+`sendMail` debe esperar el resultado del proveedor y propagar fallos; una respuesta de alta o recuperación no demuestra entrega final del correo. La aplicación debe gestionar reintentos, errores de base de datos/red y cierre ordenado. No registrar URLs de verificación, magic link o recuperación, ni dejar esos parámetros en logs del proxy, analítica o Referer.
 
-Social-provider consent/callback failures and browser WebAuthn cancellation do not create a session. A consumed magic-link token cannot be reused even if subsequent account creation fails. Database and network errors require host error handling. Run `npm run docs:check` to render every Mermaid block in Chromium; this checks diagram syntax and layout, while HTTP/browser tests validate the executable flows.
+Los diagramas expresan el comportamiento esperado y no sustituyen pruebas: `npm run docs:check` renderiza todos los bloques Mermaid; `npm test` comprueba HTTP y `npm run test:e2e` el navegador. OAuth real y entrega de correo real requieren validación de la aplicación consumidora.

@@ -11,6 +11,8 @@ async function openMail(page: Page, email: string, kind: string) {
     .find((item) => item.to === email && item.kind === kind);
   expect(message).toBeTruthy();
   await page.goto(message!.url);
+  if (kind === "magic-link")
+    await page.getByRole("button", { name: "Continuar", exact: true }).click();
 }
 test("registro, verificación, sesión, passkeys y recuperación desde la interfaz", async ({
   page,

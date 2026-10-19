@@ -1,18 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes, createHmac } from "node:crypto";
+import { randomBytes, createHmac, createHash, scrypt, argon2 } from "node:crypto";
 import { Pool } from "pg";
 import {
   createBouncer,
   createDevelopmentMailbox,
+  hashPassword,
+  verifyPassword,
   toNodeHandler,
   fromNodeHeaders,
   type BouncerOptions,
 } from "../packages/api/src/index.js";
+import { securityStore } from "../packages/api/src/security-store.js";
+
+const apiRequire = createRequire(new URL("../packages/api/package.json", import.meta.url));
+const Database = apiRequire("better-sqlite3") as typeof import("better-sqlite3");
 
 async function fixture(
   appId: string,
@@ -107,11 +114,213 @@ function cookie(response: Response) {
     .filter((value) => !value.endsWith("="))
     .join("; ");
 }
+function submitMagicLink(baseURL: string, link: string, origin = baseURL) {
+  const values = new URLSearchParams(new URL(link).hash.slice(1));
+  return fetch(`${baseURL}/api/auth/magic-link/consume`, {
+    method: "POST",
+    headers: {
+      origin,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: values,
+    redirect: "manual",
+  });
+}
 const user = {
   name: "Baul",
   email: "baul@example.test",
   password: "Bouncer isolated fixture phrase 7391",
 };
+
+async function legacyScryptHash(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  const hash = await new Promise<Buffer>((resolve, reject) => scrypt(
+    password.normalize("NFKC"),
+    salt,
+    64,
+    { N: 16_384, r: 16, p: 1, maxmem: 128 * 16_384 * 16 * 2 },
+    (error, key) => error ? reject(error) : resolve(key),
+  ));
+  return `${salt}:${hash.toString("hex")}`;
+}
+
+test("password helpers reject inputs over the byte limit before hashing", async () => {
+  const oversized = "x".repeat(1025);
+  await assert.rejects(hashPassword(oversized), { code: "PASSWORD_LENGTH" });
+  assert.equal(await verifyPassword({ password: oversized, hash: "legacy-scrypt-placeholder" }), false);
+});
+
+test("Argon2id acepta parámetros configurables y verifica formatos heredados", async () => {
+  const password = "Phrase avec Unicode 🧭 et gestionnaire 4821";
+  const parameters = { memoryKiB: 19_456, passes: 2, parallelism: 2 };
+  const current = await hashPassword(password, parameters);
+  assert.match(current, /^argon2id-v2:19456:2:2:/);
+  assert.equal(await verifyPassword({ password, hash: current }), true);
+
+  const salt = randomBytes(16);
+  const oldArgonTag = await new Promise<Buffer>((resolve, reject) => argon2("argon2id", {
+    message: password,
+    nonce: salt,
+    memory: 19_456,
+    passes: 2,
+    parallelism: 1,
+    tagLength: 32,
+  }, (error, value) => error ? reject(error) : resolve(value)));
+  assert.equal(await verifyPassword({ password, hash: `argon2id-v1:${salt.toString("hex")}:${oldArgonTag.toString("hex")}` }), true);
+
+  assert.equal(await verifyPassword({ password, hash: await legacyScryptHash(password) }), true);
+});
+
+test("password reset response stays generic when email delivery fails", async () => {
+  let deliveryUnavailable = false;
+  const f = await fixture("reset_delivery", true, {
+    requireEmailVerification: false,
+    methods: { emailPassword: true },
+    sendMail: async ({ url }) => {
+      if (deliveryUnavailable) throw new Error(`SMTP failure for ${url}`);
+    },
+  });
+  try {
+    await f.call("/sign-up/email", { email: "known@example.test", name: "Known", password: "Bouncer reset fixture phrase 1284" });
+    deliveryUnavailable = true;
+    const [known, unknown] = await Promise.all([
+      f.call("/request-password-reset", { email: "known@example.test" }),
+      f.call("/request-password-reset", { email: "unknown@example.test" }),
+    ]);
+    assert.equal(known.status, 200);
+    assert.equal(unknown.status, 200);
+    assert.deepEqual(await known.json(), await unknown.json());
+  } finally { await f.close(); }
+});
+
+test("un login válido migra progresivamente un hash scrypt a Argon2id", async () => {
+  const f = await fixture("password_rehash", true, {
+    requireEmailVerification: false,
+    methods: { emailPassword: true },
+  });
+  const email = "rehash@example.test";
+  const password = "Bouncer legacy password phrase 4927";
+  try {
+    await f.call("/sign-up/email", { email, name: "Rehash", password });
+    const ctx = await f.bouncer.auth.$context;
+    const user = await ctx.internalAdapter.findUserByEmail(email, { includeAccounts: true });
+    assert(user);
+    const credential = user.accounts.find((account) => account.providerId === "credential");
+    assert(credential);
+    await ctx.adapter.update({
+      model: "account",
+      where: [{ field: "id", value: credential.id }],
+      update: { password: await legacyScryptHash(password) },
+    });
+
+    assert.equal((await f.call("/sign-in/email", { email, password })).status, 200);
+    const upgraded = await ctx.internalAdapter.findCredentialAccount(user.user.id);
+    assert(upgraded?.password);
+    assert.match(upgraded.password, /^argon2id-v2:/);
+    assert.equal(await verifyPassword({ password, hash: upgraded.password }), true);
+  } finally { await f.close(); }
+});
+
+test("admin.setPassword actualiza la credencial y revoca sesiones juntas", async () => {
+  const f = await fixture("admin_password", true, {
+    requireEmailVerification: false,
+    methods: { emailPassword: true },
+  });
+  const email = "admin-password@example.test";
+  const oldPassword = "Bouncer admin password fixture 3481";
+  const newPassword = "Bouncer admin replacement phrase 6274";
+  try {
+    await f.call("/sign-up/email", { email, name: "Admin password", password: oldPassword });
+    const login = await f.call("/sign-in/email", { email, password: oldPassword });
+    const oldCookie = cookie(login);
+    const session = await f.bouncer.getSession(new Headers({ cookie: oldCookie }));
+    assert(session);
+
+    await f.bouncer.admin.setPassword(session.user.id, newPassword);
+
+    assert.equal(await f.bouncer.getSession(new Headers({ cookie: oldCookie })), null);
+    assert.equal((await f.call("/sign-in/email", { email, password: oldPassword })).status, 401);
+    assert.equal((await f.call("/sign-in/email", { email, password: newPassword })).status, 200);
+  } finally { await f.close(); }
+});
+
+test("migración protege sesiones, verificaciones y tokens OAuth heredados", async () => {
+  const database = new Database(":memory:");
+  const secret = "bouncer migration fixture secret 8472";
+  try {
+    database.exec(`
+      CREATE TABLE "bouncer_migrate_session" ("id" TEXT PRIMARY KEY, "token" TEXT NOT NULL);
+      CREATE TABLE "bouncer_migrate_verification" ("id" TEXT PRIMARY KEY, "identifier" TEXT NOT NULL);
+      CREATE TABLE "bouncer_migrate_account" (
+        "id" TEXT PRIMARY KEY, "accessToken" TEXT, "refreshToken" TEXT, "idToken" TEXT
+      );
+    `);
+    database.prepare(`INSERT INTO "bouncer_migrate_session" VALUES (?, ?)`)
+      .run("session-1", "legacy-session-token");
+    database.prepare(`INSERT INTO "bouncer_migrate_verification" VALUES (?, ?)`)
+      .run("verification-1", "reset-password:legacy-reset-token");
+    database.prepare(`INSERT INTO "bouncer_migrate_account" VALUES (?, ?, ?, ?)`)
+      .run("account-1", "legacy-access-token", "legacy-refresh-token", null);
+
+    const store = securityStore(database, false, "bouncer_migrate");
+    await store.migrate();
+    await store.migrateCredentialStorage(
+      "bouncer_migrate_session",
+      "bouncer_migrate_verification",
+      "bouncer_migrate_account",
+      (token) => `bouncer-session-hmac-v1:${token}`,
+      async (token) => Buffer.from(`${secret}:${token}`).toString("hex"),
+    );
+
+    const session = database.prepare(`SELECT "token" FROM "bouncer_migrate_session" WHERE "id" = ?`).get("session-1") as { token: string };
+    assert.equal(session.token, "bouncer-session-hmac-v1:legacy-session-token");
+    const verification = database.prepare(`SELECT "identifier" FROM "bouncer_migrate_verification" WHERE "id" = ?`).get("verification-1") as { identifier: string };
+    assert.equal(verification.identifier, createHash("sha256").update("reset-password:legacy-reset-token").digest("base64url"));
+    const account = database.prepare(`SELECT "accessToken", "refreshToken" FROM "bouncer_migrate_account" WHERE "id" = ?`).get("account-1") as { accessToken: string; refreshToken: string };
+    assert.match(account.accessToken, /^[a-f0-9]+$/);
+    assert.match(account.refreshToken, /^[a-f0-9]+$/);
+    assert.equal(Buffer.from(account.accessToken, "hex").toString(), `${secret}:legacy-access-token`);
+    assert.equal(Buffer.from(account.refreshToken, "hex").toString(), `${secret}:legacy-refresh-token`);
+    database.prepare(`DELETE FROM "bouncer_migrate_security_meta" WHERE "key" = ?`)
+      .run("oauth-tokens-encrypted-v1");
+    await store.migrateCredentialStorage(
+      "bouncer_migrate_session",
+      "bouncer_migrate_verification",
+      "bouncer_migrate_account",
+      (token) => `bouncer-session-hmac-v1:${token}`,
+      async (token) => Buffer.from(`${secret}:${token}`).toString("hex"),
+    );
+    const stillEncrypted = database.prepare(`SELECT "accessToken" FROM "bouncer_migrate_account" WHERE "id" = ?`).get("account-1") as { accessToken: string };
+    assert.equal(stillEncrypted.accessToken, account.accessToken);
+  } finally { database.close(); }
+});
+
+test("handler Fetch no confía en una cabecera de IP falsificada", async () => {
+  const f = await fixture("forged_ip", true, {
+    requireEmailVerification: false,
+    methods: { emailPassword: true },
+  });
+  const email = "forged-ip@example.test";
+  const password = "Bouncer forged client IP fixture 5284";
+  try {
+    await f.call("/sign-up/email", { email, name: "Forged IP", password });
+    const response = await f.bouncer.handler(new Request(`${f.baseURL}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: {
+        origin: f.baseURL,
+        "content-type": "application/json",
+        "x-bouncer-client-ip": "203.0.113.77",
+      },
+      body: JSON.stringify({ email, password }),
+    }));
+    assert.equal(response.status, 200);
+    const session = await f.bouncer.getSession(new Headers({ cookie: cookie(response) }));
+    assert(session);
+    const ctx = await f.bouncer.auth.$context;
+    const storedSession = await ctx.adapter.findOne({ model: "session", where: [{ field: "id", value: session.session.id }] });
+    assert.notEqual((storedSession as { ipAddress?: string } | null)?.ipAddress, "203.0.113.77");
+  } finally { await f.close(); }
+});
 
 test("HTTP: registro, verificación, login, sesiones, recuperación y aislamiento", async () => {
   const a = await fixture("alpha");
@@ -126,6 +335,8 @@ test("HTTP: registro, verificación, login, sesiones, recuperación y aislamient
       (await stored.internalAdapter.findUserByEmail(user.email))!.user.id,
     );
     assert(account[0].password && account[0].password !== user.password);
+    assert.match(account[0].password!, /^argon2id-v2:/);
+    assert.equal(stored.options.account?.encryptOAuthTokens, true);
     assert.equal((await a.call("/sign-in/email", user)).status, 403);
     const verification = a.mailbox.messages.find(
       (message) => message.kind === "verify-email",
@@ -137,6 +348,7 @@ test("HTTP: registro, verificación, login, sesiones, recuperación y aislamient
     );
     const login = await a.call("/sign-in/email", user);
     assert.equal(login.status, 200);
+    assert.equal("token" in await login.clone().json(), false);
     const firstCookie = cookie(login);
     assert(firstCookie.includes("bouncer_alpha"));
     assert(
@@ -153,7 +365,17 @@ test("HTTP: registro, verificación, login, sesiones, recuperación y aislamient
       undefined,
       firstCookie,
     );
-    assert.equal((await sessionResponse.json()).user.email, user.email);
+    const sessionBody = await sessionResponse.json();
+    assert.equal(sessionBody.user.email, user.email);
+    assert.equal("token" in sessionBody.session, false);
+    const publicSession = await a.bouncer.getSession(new Headers({ cookie: firstCookie }));
+    assert(publicSession && !("token" in publicSession.session));
+    const directApiSession = await a.bouncer.auth.api.getSession({ headers: new Headers({ cookie: firstCookie }) });
+    assert(directApiSession && !("token" in directApiSession.session));
+    const userId = (await stored.internalAdapter.findUserByEmail(user.email))!.user.id;
+    const persistedSessions = await stored.adapter.findMany({ model: "session", where: [{ field: "userId", value: userId }] });
+    assert(persistedSessions.length > 0);
+    assert(persistedSessions.every((session) => String((session as { token: string }).token).startsWith("bouncer-session-hmac-v1:")));
     assert.equal(
       await (await b.call("/get-session", undefined, firstCookie)).json(),
       null,
@@ -162,11 +384,13 @@ test("HTTP: registro, verificación, login, sesiones, recuperación y aislamient
     const secondLogin = await a.call("/sign-in/email", user);
     assert.equal(secondLogin.status, 200);
     const secondCookie = cookie(secondLogin);
-    assert.equal(
-      (await (await a.call("/list-sessions", undefined, firstCookie)).json())
-        .length,
-      2,
-    );
+    const listedSessions = await (await a.call("/list-sessions", undefined, firstCookie)).json();
+    assert.equal(listedSessions.length, 2);
+    assert(listedSessions.every((session: Record<string, unknown>) => !("token" in session)));
+    const secondSession = await (await a.call("/get-session", undefined, secondCookie)).json();
+    assert.equal((await a.call("/reauthenticate", { password: user.password }, firstCookie)).status, 200);
+    assert.equal((await a.call("/revoke-session-by-id", { id: secondSession.session.id }, firstCookie)).status, 200);
+    assert.equal(await (await a.call("/get-session", undefined, secondCookie)).json(), null);
     assert.equal(
       (await a.call("/revoke-other-sessions", {}, firstCookie)).status,
       200,
@@ -199,6 +423,14 @@ test("HTTP: registro, verificación, login, sesiones, recuperación y aislamient
       (message) => message.kind === "reset-password",
     )!;
     assert(reset);
+    const rawResetToken = new URL(reset.url).pathname.split("/").at(-1)!;
+    const resetRows = await stored.adapter.findMany({
+      model: "verification",
+      where: [{ field: "identifier", value: createHash("sha256").update(`reset-password:${rawResetToken}`).digest("base64url") }],
+    });
+    const hashedResetIdentifier = createHash("sha256").update(`reset-password:${rawResetToken}`).digest("base64url");
+    assert(resetRows.some((row) => (row as { identifier: string }).identifier === hashedResetIdentifier));
+    assert(resetRows.every((row) => !(row as { identifier: string }).identifier.includes(rawResetToken)));
     const resetRedirect = await fetch(reset.url, { redirect: "manual" });
     assert.equal(resetRedirect.status, 302);
     const token = new URL(
@@ -258,7 +490,14 @@ test("HTTP: enlace mágico de un solo uso, logout y registro cerrado", async () 
     );
     const message = a.mailbox.messages.at(-1)!;
     assert.equal(message.kind, "magic-link");
-    const redeemed = await fetch(message.url, { redirect: "manual" });
+    const scanner = await a.bouncer.auth.handler(new Request(message.url));
+    assert.equal(scanner.status, 200);
+    assert.equal(scanner.headers.get("cache-control"), "no-store, max-age=0");
+    assert.equal(scanner.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(scanner.headers.getSetCookie().length, 0);
+    assert.equal(new URL(message.url).searchParams.has("token"), false);
+    assert.equal((await submitMagicLink(a.baseURL, message.url, "https://attacker.example")).status, 403);
+    const redeemed = await submitMagicLink(a.baseURL, message.url);
     assert.equal(redeemed.status, 302);
     const sessionCookie = cookie(redeemed);
     assert.equal(
@@ -266,7 +505,7 @@ test("HTTP: enlace mágico de un solo uso, logout y registro cerrado", async () 
         .user.email,
       user.email,
     );
-    const replay = await fetch(message.url, { redirect: "manual" });
+    const replay = await submitMagicLink(a.baseURL, message.url);
     assert.match(replay.headers.get("location") ?? "", /error=/);
     assert.equal((await a.call("/sign-out", {}, sessionCookie)).status, 200);
     assert.equal(
@@ -278,9 +517,9 @@ test("HTTP: enlace mágico de un solo uso, logout y registro cerrado", async () 
       email: user.email,
       callbackURL: "/",
     });
-    const denied = await fetch(closed.mailbox.messages.at(-1)!.url, {
-      redirect: "manual",
-    });
+    const deniedLink = closed.mailbox.messages.at(-1)!.url;
+    assert.equal((await fetch(deniedLink, { redirect: "manual" })).status, 200);
+    const denied = await submitMagicLink(closed.baseURL, deniedLink);
     assert.match(denied.headers.get("location") ?? "", /error=/);
     assert.equal(
       await (
@@ -289,10 +528,44 @@ test("HTTP: enlace mágico de un solo uso, logout y registro cerrado", async () 
       null,
     );
     assert.equal((await a.call("/list-sessions")).status, 401);
+
+    await a.call("/sign-in/magic-link", {
+      email: "concurrent@example.test",
+      callbackURL: "/",
+    });
+    const concurrentLink = a.mailbox.messages.at(-1)!.url;
+    assert.equal((await fetch(concurrentLink, { redirect: "manual" })).status, 200);
+    const competing = await Promise.all([
+      submitMagicLink(a.baseURL, concurrentLink),
+      submitMagicLink(a.baseURL, concurrentLink),
+    ]);
+    const resultingSessions = await Promise.all(
+      competing.map((response) =>
+        a.call("/get-session", undefined, cookie(response)).then((result) => result.json()),
+      ),
+    );
+    assert.equal(resultingSessions.filter((session) => session?.user).length, 1);
   } finally {
     await a.close();
     await closed.close();
   }
+});
+
+test("cuotas persistentes limitan el envío masivo de magic links por destinatario", async () => {
+  const f = await fixture("mail_recipient_limit", true, { methods: { magicLink: true } });
+  try {
+    const responses = await Promise.all(Array.from({ length: 3 }, () =>
+      f.call("/sign-in/magic-link", { email: "target@example.test" }),
+    ));
+    assert(responses.every((response) => response.status === 200));
+    assert.equal(
+      f.mailbox.messages.filter((message) => message.kind === "magic-link" && message.to === "target@example.test").length,
+      2,
+    );
+    assert.deepEqual(await Promise.all(responses.map((response) => response.json())), [
+      { status: true }, { status: true }, { status: true },
+    ]);
+  } finally { await f.close(); }
 });
 
 test("HTTP: limita intentos de login", async () => {
@@ -403,7 +676,8 @@ test("HTTP: methods are an API allowlist; username login and magic links work in
       200,
     );
     const link = magicOnly.mailbox.messages.at(-1)!;
-    const redeemed = await fetch(link.url, { redirect: "manual" });
+    assert.equal((await fetch(link.url, { redirect: "manual" })).status, 200);
+    const redeemed = await submitMagicLink(magicOnly.baseURL, link.url);
     assert.equal(redeemed.status, 302);
     assert(
       (
@@ -431,13 +705,19 @@ test("HTTP: contraseñas filtradas, reautenticación y revocación persistente",
     assert.equal((await weak.json()).code, "PASSWORD_COMPROMISED");
     const password = "Bouncer private security phrase 8734";
     assert.equal((await f.call("/sign-up/email", { email: "safe@example.test", password, name: "Safe" })).status, 200);
+    assert.equal((await f.call("/sign-in/email", { email: "safe@example.test", password: "x".repeat(1025) })).status, 400);
+    assert.equal((await f.call("/sign-in/email", { email: `${"x".repeat(250)}@example.test`, password })).status, 400);
     const login = await f.call("/sign-in/email", { email: "safe@example.test", password });
+    assert.equal(login.headers.get("cache-control"), "no-store, max-age=0");
+    assert.equal(login.headers.get("referrer-policy"), "no-referrer");
     const cookie = login.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
     const session = await f.bouncer.getSession(new Headers({ cookie }));
     assert(session);
     const ctx = await f.bouncer.auth.$context;
     await ctx.adapter.update({ model: "session", where: [{ field: "id", value: session.session.id }], update: { createdAt: new Date(Date.now() - 600_000) } });
     assert.equal((await f.call("/revoke-other-sessions", {}, cookie)).status, 403);
+    assert.equal((await f.call("/change-email", { newEmail: "new-safe@example.test" }, cookie)).status, 403);
+    assert.equal((await f.call("/reauthenticate", { password: "x".repeat(8192) }, cookie)).status, 413);
     assert.equal((await f.call("/reauthenticate", { password: "incorrect" }, cookie)).status, 401);
     assert.equal((await f.call("/reauthenticate", { password }, cookie, "https://attacker.example")).status, 403);
     assert.equal((await f.call("/reauthenticate", { password }, cookie)).status, 200);
@@ -445,6 +725,36 @@ test("HTTP: contraseñas filtradas, reautenticación y revocación persistente",
     await f.bouncer.admin.disableUser(session.user.id, true);
     assert.equal(await f.bouncer.getSession(new Headers({ cookie })), null);
     assert.notEqual((await f.call("/sign-in/email", { email: "safe@example.test", password })).status, 200);
+  } finally { await f.close(); }
+});
+
+test("Bouncer.getSession revoca sesiones inactivas y de vida absoluta excedida", async () => {
+  const f = await fixture("session_expiry", true, { sendMail: undefined, requireEmailVerification: false, methods: { emailPassword: true } });
+  try {
+    const password = "Bouncer session expiry fixture 3471";
+    await f.call("/sign-up/email", { email: "expiry@example.test", name: "Expiry", password });
+    const first = await f.call("/sign-in/email", { email: "expiry@example.test", password });
+    const firstCookie = cookie(first);
+    const ctx = await f.bouncer.auth.$context;
+    const firstSession = await f.bouncer.getSession(new Headers({ cookie: firstCookie }));
+    assert(firstSession);
+    await ctx.adapter.update({
+      model: "session",
+      where: [{ field: "id", value: firstSession.session.id }],
+      update: { updatedAt: new Date(Date.now() - 13 * 3600_000) },
+    });
+    assert.equal(await f.bouncer.getSession(new Headers({ cookie: firstCookie })), null);
+
+    const second = await f.call("/sign-in/email", { email: "expiry@example.test", password });
+    const secondCookie = cookie(second);
+    const secondSession = await f.bouncer.getSession(new Headers({ cookie: secondCookie }));
+    assert(secondSession);
+    await ctx.adapter.update({
+      model: "session",
+      where: [{ field: "id", value: secondSession.session.id }],
+      update: { createdAt: new Date(Date.now() - 8 * 86400_000) },
+    });
+    assert.equal(await f.bouncer.getSession(new Headers({ cookie: secondCookie })), null);
   } finally { await f.close(); }
 });
 
@@ -466,6 +776,12 @@ test("HTTP: TOTP exige segundo factor y los códigos de recuperación son de un 
     await f.call("/sign-up/email", { email: "mfa@example.test", name: "MFA", password });
     const login = await f.call("/sign-in/email", { email: "mfa@example.test", password });
     let cookie = cookies(login);
+    const session = await f.bouncer.getSession(new Headers({ cookie }));
+    assert(session);
+    const ctx = await f.bouncer.auth.$context;
+    await ctx.adapter.update({ model: "session", where: [{ field: "id", value: session.session.id }], update: { createdAt: new Date(Date.now() - 600_000) } });
+    assert.equal((await f.call("/two-factor/enable", { password }, cookie)).status, 403);
+    assert.equal((await f.call("/reauthenticate", { password }, cookie)).status, 200);
     const enrollment = await f.call("/two-factor/enable", { password }, cookie);
     assert.equal(enrollment.status, 200);
     const setup = await enrollment.json();

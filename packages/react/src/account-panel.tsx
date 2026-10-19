@@ -87,7 +87,10 @@ export function AccountPanel({ logo, compact = false }: { logo?: ReactNode; comp
               {item.id !== session.data?.session.id && (
                 <button
                   onClick={() =>
-                    void run(() => client.revokeSession({ token: item.token }))
+                    void run(() => client.$fetch("/revoke-session-by-id", {
+                      method: "POST",
+                      body: { id: item.id },
+                    }))
                   }
                 >
                   Revocar

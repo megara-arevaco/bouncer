@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@better-auth/core": "1.7.10",
     "@better-auth/passkey": "1.7.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/pg": "^8.23.1",

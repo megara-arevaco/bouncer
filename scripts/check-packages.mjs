@@ -9,12 +9,15 @@ const compiler = resolve("node_modules/typescript/bin/tsc");
 try {
   await writeFile(join(directory, "package.json"), JSON.stringify({ private: true, type: "module" }));
   execFileSync("npm", ["install", "--no-audit", "--no-fund",
-    ...["api", "react"].map((name) => resolve(`artifacts/v${version}/bouncer-${name}-${version}.tgz`)),
+    ...["api", "react", "authorization"].map((name) => resolve(`artifacts/v${version}/bouncer-${name}-${version}.tgz`)),
     "react@19", "react-dom@19", "@types/react@19", "@types/react-dom@19"],
   { cwd: directory, stdio: "inherit" });
   await writeFile(join(directory, "consumer.mts"), `
 import { createBouncer, createDevelopmentMailbox } from "@bouncer/api";
 import { AuthPanel, createBouncerClient } from "@bouncer/react";
+import { createAuthorization } from "@bouncer/authorization";
+const permissions = createAuthorization({ roles: { admin: ["manage"] }, getRole: (user: { role: string }) => user.role });
+if (!(await permissions.can({ role: "admin" }, "manage")) || await permissions.can(null, "manage")) throw new Error("Invalid authorization grants");
 const auth = createBouncer({
   appId: "consumer", baseURL: "http://localhost:3000",
   secret: "release-smoke-test-secret-at-least-32-characters",

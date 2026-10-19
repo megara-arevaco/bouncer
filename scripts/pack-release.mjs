@@ -2,12 +2,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
-const packages = ["api", "react"];
+const packages = ["api", "react", "authorization"];
 const manifests = await Promise.all(packages.map(async (name) =>
   JSON.parse(await readFile(`packages/${name}/package.json`, "utf8"))));
 const version = manifests[0].version;
 if (!/^\d+\.\d+\.\d+$/.test(version) || manifests.some((p) => p.version !== version))
-  throw new Error("Both packages must use the same stable SemVer version.");
+  throw new Error("All packages must use the same stable SemVer version.");
 if (process.env.GITHUB_REF_TYPE === "tag" && process.env.GITHUB_REF_NAME !== `v${version}`)
   throw new Error("Release tag and package versions do not match.");
 const destination = `artifacts/v${version}`;
